@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-
+from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session
@@ -10,40 +9,41 @@ from .config import settings
 from .db import init_db, get_session
 from .models import Transfer, VehicleClass
 from .schemas import TransferCreate, TransferRead
+from .security import verify_telegram_init_data
 from .telegram_forwarder import forward_transfer_message
-
-# auth helpers из app/auth.py
-from .auth import require_telegram, validate_init_data
 
 app = FastAPI(title="Transfer API")
 
-# === CORS: ВСЕГДА включён (иначе preflight OPTIONS даст 405) ===
-# На проде можно сузить до ["https://ride-request-bot.lovable.app"]
+# ✅ CORS включен по умолчанию, даже если переменная пустая
+origins_str = getattr(settings, "CORS_ORIGINS", "").strip()
+origins = [o.strip() for o in origins_str.split(",") if o.strip()] if origins_str else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ==== Lifecycle ====
+
 @app.on_event("startup")
 def on_startup() -> None:
     init_db()
 
-# ==== Basic endpoints ====
+
 @app.get("/")
 def root():
     return {"ok": True, "service": "transfer-api"}
+
 
 @app.get("/health")
 def health():
     return "ok"
 
-# ==== Business validations ====
+
+# ✅ Проверка вместимости в зависимости от класса
 def validate_capacity(vehicle_class: VehicleClass, pax: int) -> None:
-    # minivan <= 6, остальные <= 3
     cap = 6 if vehicle_class == VehicleClass.minivan else 3
     if pax > cap:
         raise HTTPException(
@@ -51,34 +51,45 @@ def validate_capacity(vehicle_class: VehicleClass, pax: int) -> None:
             detail=f"Для класса {vehicle_class} максимум {cap} пассажиров.",
         )
 
+
+# ✅ Исправлена обработка часовых поясов
 def validate_datetime(dt: datetime) -> None:
-    # не раньше чем через 30 минут от текущего UTC
-    min_dt = datetime.utcnow() + timedelta(minutes=30)
+    # Если дата без tzinfo — считаем её UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+
+    min_dt = datetime.now(timezone.utc) + timedelta(minutes=30)
     if dt < min_dt:
         raise HTTPException(
             status_code=422,
             detail="Дата/время должны быть не раньше чем через 30 минут.",
         )
 
-# ==== Main endpoint ====
+
 @app.post("/transfers", response_model=TransferRead, status_code=201)
 async def create_transfer(
     data: TransferCreate,
     request: Request,
     session: Session = Depends(get_session),
-    # Принимаем ОБА варианта заголовка (на фронте используем X-Telegram-InitData):
+    # Принимаем оба варианта заголовка
     x_init_1: str | None = Header(None, alias="X-Telegram-InitData"),
     x_init_2: str | None = Header(None, alias="X-Telegram-Init-Data"),
-    _auth_ok = Depends(require_telegram),  # строгая проверка initData, если задан BOT_TOKEN
 ):
-    # Берём initData для сохранения в БД (если нужно)
+    # 📌 Получаем initData
     init_data = (x_init_1 or x_init_2 or data.telegram_init_data or "").strip()
+
+    # Если BOT_TOKEN задан — проверяем подпись
+    if settings.BOT_TOKEN:
+        if not init_data or not verify_telegram_init_data(init_data):
+            raise HTTPException(status_code=401, detail="Invalid Telegram init data")
 
     # Бизнес-валидации
     validate_capacity(data.vehicle_class, data.pax_count)
     validate_datetime(data.datetime)
 
-    # Сохранение
+    # Сохраняем в БД
     transfer = Transfer(
         departure_city=data.departure_city,
         departure_address=data.departure_address,
@@ -98,7 +109,7 @@ async def create_transfer(
     session.commit()
     session.refresh(transfer)
 
-    # Уведомление во второй бот/чат (best-effort)
+    # Отправляем уведомление в Telegram (если настроено)
     text = (
         "<b>Новая заявка на трансфер</b>\n"
         f"🗓 <b>Когда:</b> {data.datetime.isoformat()}\n"
@@ -114,39 +125,6 @@ async def create_transfer(
     try:
         await forward_transfer_message(text)
     except Exception:
-        # не падаем, если пересылка недоступна
-        pass
+        pass  # не роняем обработку, если пересылка не настроена
 
     return TransferRead(id=transfer.id, status="accepted")
-
-# ==== Временный диагностический эндпоинт ====
-# Проверяет, доходит ли initData и валиден ли он (с учётом settings.BOT_TOKEN)
-@app.post("/__debug/initdata")
-async def debug_init(
-    request: Request,
-    x1: str | None = Header(None, alias="X-Telegram-InitData"),
-    x2: str | None = Header(None, alias="X-Telegram-Init-Data"),
-):
-    from .config import settings  # чтобы видеть текущее значение BOT_TOKEN
-    raw = x1 or x2
-    src = "header" if raw else ""
-    if not raw:
-        try:
-            body = await request.json()
-            raw = body.get("telegram_init_data", "")
-            src = "body" if raw else ""
-        except Exception:
-            raw = ""
-    if settings.BOT_TOKEN:
-        ok, info = validate_init_data(raw, settings.BOT_TOKEN)
-        return {
-            "source": src,
-            "has_value": bool(raw),
-            "valid": ok,
-            "raw_len": info.get("raw_len", 0),
-            "has_hash": info.get("has_hash", False),
-            "calc_pref": info.get("calc_pref", ""),
-            "recv_pref": info.get("recv_pref", ""),
-        }
-    else:
-        return {"source": src, "has_value": bool(raw), "valid": "skipped(no BOT_TOKEN)"}
