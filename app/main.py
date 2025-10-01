@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
+
 from fastapi import FastAPI, Depends, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session
@@ -9,31 +10,32 @@ from .config import settings
 from .db import init_db, get_session
 from .models import Transfer, VehicleClass
 from .schemas import TransferCreate, TransferRead
-from .security import verify_telegram_init_data
 from .telegram_forwarder import forward_transfer_message
 
 app = FastAPI(title="Transfer API")
 
-# ✅ CORS включен по умолчанию, даже если переменная пустая
-origins_str = getattr(settings, "CORS_ORIGINS", "").strip()
+# ✅ CORS: если CORS_ORIGINS пустой — разрешаем всё (нужно для Lovable и тестов)
+origins_str = settings.CORS_ORIGINS.strip() if hasattr(settings, "CORS_ORIGINS") else ""
 origins = [o.strip() for o in origins_str.split(",") if o.strip()] if origins_str else ["*"]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["*"],  # POST / OPTIONS / GET и т.д.
     allow_headers=["*"],
 )
 
 
 @app.on_event("startup")
 def on_startup() -> None:
+    """Инициализация БД при запуске приложения"""
     init_db()
 
 
 @app.get("/")
 def root():
+    """Проверка что сервис жив"""
     return {"ok": True, "service": "transfer-api"}
 
 
@@ -42,8 +44,8 @@ def health():
     return "ok"
 
 
-# ✅ Проверка вместимости в зависимости от класса
 def validate_capacity(vehicle_class: VehicleClass, pax: int) -> None:
+    """Проверка вместимости по типу авто"""
     cap = 6 if vehicle_class == VehicleClass.minivan else 3
     if pax > cap:
         raise HTTPException(
@@ -52,15 +54,14 @@ def validate_capacity(vehicle_class: VehicleClass, pax: int) -> None:
         )
 
 
-# ✅ Исправлена обработка часовых поясов
 def validate_datetime(dt: datetime) -> None:
-    # Если дата без tzinfo — считаем её UTC
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
+    """Проверка, что дата не раньше чем через 30 мин от текущего UTC"""
+    min_dt = datetime.utcnow() + timedelta(minutes=30)
 
-    min_dt = datetime.now(timezone.utc) + timedelta(minutes=30)
+    # 📝 Обязательно делаем обе даты "наивными" или обе "aware", чтобы не падало
+    if dt.tzinfo is not None:
+        dt = dt.replace(tzinfo=None)
+
     if dt < min_dt:
         raise HTTPException(
             status_code=422,
@@ -77,11 +78,18 @@ async def create_transfer(
     x_init_1: str | None = Header(None, alias="X-Telegram-InitData"),
     x_init_2: str | None = Header(None, alias="X-Telegram-Init-Data"),
 ):
-    # 📌 Получаем initData
+    """
+    Создание новой заявки.
+    При включённой проверке — валидируем подпись Telegram через initData.
+    """
+
+    # Берём initData: сначала заголовки, потом поле из тела
     init_data = (x_init_1 or x_init_2 or data.telegram_init_data or "").strip()
 
-    # Если BOT_TOKEN задан — проверяем подпись
-    if settings.BOT_TOKEN:
+    # 🛡 Проверка initData (если не отключена флагом)
+    if not settings.SKIP_INITDATA_VERIFY and settings.BOT_TOKEN:
+        from .security import verify_telegram_init_data
+
         if not init_data or not verify_telegram_init_data(init_data):
             raise HTTPException(status_code=401, detail="Invalid Telegram init data")
 
@@ -89,7 +97,7 @@ async def create_transfer(
     validate_capacity(data.vehicle_class, data.pax_count)
     validate_datetime(data.datetime)
 
-    # Сохраняем в БД
+    # Сохраняем заявку в БД
     transfer = Transfer(
         departure_city=data.departure_city,
         departure_address=data.departure_address,
@@ -109,7 +117,7 @@ async def create_transfer(
     session.commit()
     session.refresh(transfer)
 
-    # Отправляем уведомление в Telegram (если настроено)
+    # Уведомление в Telegram (best-effort)
     text = (
         "<b>Новая заявка на трансфер</b>\n"
         f"🗓 <b>Когда:</b> {data.datetime.isoformat()}\n"
@@ -125,6 +133,7 @@ async def create_transfer(
     try:
         await forward_transfer_message(text)
     except Exception:
-        pass  # не роняем обработку, если пересылка не настроена
+        # Не прерываем, если уведомление не дошло
+        pass
 
     return TransferRead(id=transfer.id, status="accepted")
