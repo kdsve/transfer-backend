@@ -11,6 +11,7 @@ from .db import init_db, get_session
 from .models import Transfer, VehicleClass
 from .schemas import TransferCreate, TransferRead
 from .telegram_forwarder import forward_transfer_message
+from .telegram_notify import send_user_confirmation
 
 app = FastAPI(title="Transfer API")
 
@@ -45,7 +46,7 @@ def health():
 def validate_capacity(vehicle_class: VehicleClass, pax: int) -> None:
     """
     Проверка вместимости по типу авто:
-    - Минивэн: до 6 пассажиров
+    - Минивэн: до 7 пассажиров
     - Остальные классы: до 3 пассажиров
     """
     cap = 7 if vehicle_class == VehicleClass.minivan else 3
@@ -222,12 +223,28 @@ async def create_transfer(
     session.commit()
     session.refresh(transfer)
 
-    # 5) Отправка уведомления в Telegram (если настроены FORWARD_* переменные)
+    # 5) Отправка уведомления менеджерам/в канал
     text = build_transfer_text(data, transfer.id)
     try:
         await forward_transfer_message(text)
     except Exception:
-        # уведомление не критично для успеха запроса
-        pass
+        pass  # уведомление не критично для успеха запроса
+
+    # 6) Подтверждение пользователю (в диалог с тем же ботом, из которого открыт WebApp)
+    # Работает, когда мини-апп открыт из Telegram и есть BOT_TOKEN.
+    try:
+        if settings.BOT_TOKEN and init_data:
+            confirm = (
+                "Ваша заявка успешно создана.\n\n"
+                f"ID заявки: {transfer.id}\n"
+                f"Когда: {human_datetime(data.datetime)}\n"
+                f"Класс автомобиля: {human_vehicle_label(data.vehicle_class)}\n"
+                f"Пассажиров: {data.pax_count}\n"
+                f"Откуда: {data.departure_city}, {data.departure_address}\n"
+                f"Куда: {data.arrival_city}, {data.arrival_address}\n"
+            )
+            await send_user_confirmation(settings.BOT_TOKEN, init_data, confirm)
+    except Exception:
+        pass  # подтверждение пользователю — best effort
 
     return TransferRead(id=transfer.id, status="accepted")
