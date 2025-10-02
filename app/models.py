@@ -9,6 +9,7 @@ class VehicleClass(str, Enum):
     comfort = "comfort"
     business = "business"
     minivan = "minivan"
+    premium = "premium"
 
 class ContactMethod(str, Enum):
     whatsapp = "whatsapp"
