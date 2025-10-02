@@ -79,6 +79,7 @@ VEHICLE_LABELS = {
     "standard": "Стандарт",
     "comfort":  "Комфорт",
     "business": "Бизнес",
+    "premium":  "Премиум",
     "minivan":  "Минивэн",
 }
 CONTACT_LABELS = {
