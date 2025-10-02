@@ -8,7 +8,7 @@ from aiogram.types import (
 )
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]                 # токен вашего основного бота
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "")       # URL Lovable/вашего домена с мини-аппом
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://ride-request-bot.lovable.app/")       # URL Lovable/вашего домена с мини-аппом
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
