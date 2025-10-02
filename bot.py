@@ -3,26 +3,20 @@ import os
 import asyncio
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart
-from aiogram.types import (
-    Message, ReplyKeyboardMarkup, KeyboardButton, WebAppInfo
-)
+from aiogram.types import Message
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]                 # токен вашего основного бота
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://ride-request-bot.lovable.app/")       # URL Lovable/вашего домена с мини-аппом
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 @dp.message(CommandStart())
 async def on_start(m: Message):
-    # Кнопка, которая откроет ваш мини-апп
-    kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Открыть приложение", web_app=WebAppInfo(url=WEBAPP_URL))]],
-        resize_keyboard=True
-    )
+    # Никаких кнопок. Пользователь жмёт нижнюю меню-кнопку
+    # «Заявка на трансфер», которую ты настроил через BotFather (/setmenubutton → Web App).
     await m.answer(
-        "Здравствуйте! Нажмите кнопку ниже, чтобы открыть мини-приложение и оформить заявку.",
-        reply_markup=kb
+        "Здравствуйте! Чтобы оформить поездку, нажмите нижнюю кнопку "
+        "«Заявка на трансфер»."
     )
 
 async def main():
