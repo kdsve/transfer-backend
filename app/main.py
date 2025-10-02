@@ -48,7 +48,7 @@ def validate_capacity(vehicle_class: VehicleClass, pax: int) -> None:
     - Минивэн: до 6 пассажиров
     - Остальные классы: до 3 пассажиров
     """
-    cap = 6 if vehicle_class == VehicleClass.minivan else 3
+    cap = 7 if vehicle_class == VehicleClass.minivan else 3
     if pax > cap:
         raise HTTPException(
             status_code=422,
